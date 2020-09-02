@@ -13,6 +13,7 @@ import os
 import re
 import shutil
 import tempfile
+import zipfile
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -187,6 +188,11 @@ def save_onnx_model(save_path_root, onnx_file_name, feed_dict, model_proto, incl
         save_protobuf(target_path + ".pbtxt", model_proto, as_text=True)
     return target_path
 
+def save_onnx_zip(target_path, model_proto, external_tensor_storage):
+    with zipfile.ZipFile(target_path, 'w') as z:
+        z.writestr("__MODEL_PROTO.onnx", model_proto.SerializeToString())
+        for k, v in external_tensor_storage.name_to_tensor_data.items():
+            z.writestr(k, v)
 
 def make_sure(bool_val, error_msg, *args):
     if not bool_val:

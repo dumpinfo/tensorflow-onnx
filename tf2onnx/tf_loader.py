@@ -96,7 +96,19 @@ def inputs_without_resource(sess, input_names):
     return input_names
 
 
-def from_function(func, input_names, output_names):
+def from_function(func, input_names, output_names, large_model):
+    if large_model:
+        try:
+            # For large models we use _convert_variables_to_constants_v2_impl as a hack
+            from tensorflow.python.framework.convert_to_constants import \
+                _convert_variables_to_constants_v2_impl # pylint: disable=protected-access
+        except ImportError:
+            # This internal method could disappear in different tf versions
+            _not_implemented_tf_placeholder("_convert_variables_to_constants_v2_impl")()
+        graph_def, _ = _convert_variables_to_constants_v2_impl(func, lower_control_flow=False,
+                                                               aggressive_inlining=False)
+        return graph_def
+
     frozen_func = convert_variables_to_constants_v2(func, lower_control_flow=False)
     graph_def = frozen_func.graph.as_graph_def(add_shapes=True)
     # output_names = [i.name for i in frozen_func.outputs]
@@ -223,7 +235,8 @@ def _from_saved_model_v1(sess, model_path, input_names, output_names, tag, signa
     return frozen_graph, input_names, output_names
 
 
-def _from_saved_model_v2(model_path, input_names, output_names, tag, signature_def, concrete_function_index):
+def _from_saved_model_v2(model_path, input_names, output_names, tag, signature_def,
+                         concrete_function_index, large_model):
     """Load tensorflow graph from saved_model."""
 
     wrn_no_tag = "'--tag' not specified for saved_model. Using --tag serve"
@@ -234,6 +247,7 @@ def _from_saved_model_v2(model_path, input_names, output_names, tag, signature_d
     err_index = "Invalid concrete_function value: %i. Valid values are [0 to %i]"
     err_no_sig = "No signatures found in model. Try --concrete_function instead."
     err_sig_nomatch = "Specified signature not in model %s"
+    err_large_model = "model exceeds maximum protobuf size of 2GB. Try running with --large_model flag."
 
     if tag is None:
         tag = ['serve']
@@ -274,18 +288,26 @@ def _from_saved_model_v2(model_path, input_names, output_names, tag, signature_d
     if output_names:
         outputs = list(set(output_names) & set(outputs))
 
-    frozen_graph = from_function(concrete_func, inputs, outputs)
+    try:
+        frozen_graph = from_function(concrete_func, inputs, outputs, large_model)
+    except ValueError as e:
+        if "exceeds maximum protobuf size of 2GB" in str(e):
+            raise ValueError(err_large_model)
+        else:
+            raise e
+
     return frozen_graph, inputs, outputs
 
 
-def from_saved_model(model_path, input_names, output_names, tag=None, signatures=None, concrete_function=None):
+def from_saved_model(model_path, input_names, output_names, tag=None,
+                     signatures=None, concrete_function=None, large_model=False):
     """Load tensorflow graph from saved_model."""
     if signatures is None:
         signatures = []
     tf_reset_default_graph()
     if is_tf2():
         frozen_graph, input_names, output_names = \
-            _from_saved_model_v2(model_path, input_names, output_names, tag, signatures, concrete_function)
+            _from_saved_model_v2(model_path, input_names, output_names, tag, signatures, concrete_function, large_model)
     else:
         with tf_session() as sess:
             frozen_graph, input_names, output_names = \
@@ -316,7 +338,7 @@ def from_keras(model_path, input_names, output_names):
         output_names = [output_tensor.name for output_tensor in concrete_func.outputs
                         if output_tensor.dtype != tf.dtypes.resource]
 
-        frozen_graph = from_function(concrete_func, input_names, output_names)
+        frozen_graph = from_function(concrete_func, input_names, output_names, large_model=False)
     else:
         # Handles Keras when Eager mode is disabled.
         _keras.backend.clear_session()
